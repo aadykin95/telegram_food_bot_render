@@ -4,6 +4,6 @@ google-cloud-vision==3.4.4
 google-auth==2.23.3
 deep-translator==1.11.4
 pandas==2.0.3
-matplotlib==3.7.2
+matplotlib==3.7.1
 requests==2.31.0
 python-dotenv==1.0.0
