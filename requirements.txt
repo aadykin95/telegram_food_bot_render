@@ -1,3 +1,4 @@
+--only-binary=:all:
 pip>=24.1.2
 python-telegram-bot==20.3
 gspread==5.12.0
