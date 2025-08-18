@@ -575,6 +575,9 @@ async def button_handler(update, context):
     query = update.callback_query
     await query.answer()
 
+    # Подготовим «фейковый» update.message, чтобы можно было переиспользовать команды
+    update.message = query.message
+
     if query.data == "report_today":
         context.args = ["today"]
         await handle_report(update, context)
