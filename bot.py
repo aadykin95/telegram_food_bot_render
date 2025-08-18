@@ -288,16 +288,18 @@ async def handle_report(update, context):
     period = context.args[0].lower()
     today = datetime.now().date()
 
+    # --- Определяем период ---
     if period == "today":
-        start_date = today - timedelta(days=29)   # 30 дней
+        start_date = today  # только текущий день
     elif period == "week":
-        start_date = today - timedelta(weeks=11)  # 12 недель
+        start_date = today - timedelta(days=today.weekday())  # понедельник текущей недели
     elif period == "month":
-        start_date = today.replace(day=1) - timedelta(days=365)  # 12 мес
+        start_date = today.replace(day=1)  # первое число текущего месяца
     else:
         await update.message.reply_text("❗ Неизвестный период. Доступно: today | week | month")
         return
 
+    # --- Данные из таблицы ---
     rows = worksheet.get_all_values()[1:]  # без заголовка
     records = []
     for row in rows:
@@ -333,12 +335,11 @@ async def handle_report(update, context):
     df = pd.DataFrame(records)
     df["date"] = pd.to_datetime(df["date"])
 
+    # --- Группировка для графика ---
     if period == "today":
         # по дням
         grouped = df.groupby("date").sum(numeric_only=True).reset_index()
         grouped["label"] = grouped["date"].dt.strftime("%d.%m")
-
-        # заполним пропуски днями
         rng = pd.date_range(start=start_date, end=today, freq="D")
         full_df = pd.DataFrame({"date": rng, "label": rng.strftime("%d.%m")})
         grouped = pd.merge(full_df, grouped, on=["date", "label"], how="left").fillna(0)
@@ -349,10 +350,7 @@ async def handle_report(update, context):
         df["week"] = iso.week
         df["year"] = iso.year
         grouped = df.groupby(["year", "week"]).sum(numeric_only=True).reset_index()
-        # Подпись — номер недели (01..53)
         grouped["label"] = grouped["week"].apply(lambda w: f"{int(w):02d}")
-
-        # заполним пропуски ИСО-неделями в диапазоне
         rng = pd.date_range(start=start_date, end=today, freq="W-MON")
         iso_rng = rng.isocalendar()
         full_df = pd.DataFrame({
@@ -366,10 +364,7 @@ async def handle_report(update, context):
         df["month"] = df["date"].dt.month
         df["year"] = df["date"].dt.year
         grouped = df.groupby(["year", "month"]).sum(numeric_only=True).reset_index()
-        # Подпись — MM.YY (например 01.25)
         grouped["label"] = grouped.apply(lambda r: f"{int(r['month']):02d}.{int(r['year'])%100:02d}", axis=1)
-
-        # полный ряд месяцев
         rng = pd.date_range(start=start_date, end=today, freq="MS")
         full_df = pd.DataFrame({
             "year": rng.year,
@@ -378,13 +373,12 @@ async def handle_report(update, context):
         })
         grouped = pd.merge(full_df, grouped, on=["year", "month", "label"], how="left").fillna(0)
 
-    # Построение графика (X — готовые подписи)
+    # --- График ---
     plt.figure(figsize=(9, 5))
     plt.plot(grouped["label"], grouped["cal"], marker="o", linewidth=2, label="Калории 🔥")
     plt.plot(grouped["label"], grouped["prot"], marker="o", linewidth=2, label="Белки 💪")
     plt.plot(grouped["label"], grouped["fat"], marker="o", linewidth=2, label="Жиры 🥑")
     plt.plot(grouped["label"], grouped["carb"], marker="o", linewidth=2, label="Углеводы 🍞")
-
     plt.xlabel("Период", fontsize=12)
     plt.ylabel("Количество", fontsize=12)
     plt.title(f"Отчёт за {period}", fontsize=14)
@@ -392,16 +386,15 @@ async def handle_report(update, context):
     plt.legend()
     plt.grid(True, linestyle="--", alpha=0.7)
     plt.tight_layout()
-
     chart_path = "report_chart.png"
     plt.savefig(chart_path)
     plt.close()
 
-    # Итоги
-    total_cal = grouped["cal"].sum()
-    total_prot = grouped["prot"].sum()
-    total_fat = grouped["fat"].sum()
-    total_carb = grouped["carb"].sum()
+    # --- Итоги (только за выбранный период) ---
+    total_cal = df["cal"].sum()
+    total_prot = df["prot"].sum()
+    total_fat = df["fat"].sum()
+    total_carb = df["carb"].sum()
 
     text_report = (
         f"📊 Отчёт за {period}:\n"
@@ -413,6 +406,7 @@ async def handle_report(update, context):
 
     await update.message.reply_text(text_report)
     await update.message.reply_photo(photo=open(chart_path, "rb"))
+
 
 # === Обработчики ===
 async def handle_text(update, context):
