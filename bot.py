@@ -288,18 +288,18 @@ async def handle_report(update, context):
     period = context.args[0].lower()
     today = datetime.now().date()
 
-    # --- Определяем период ---
+    # --- Периоды для тоталов ---
     if period == "today":
-        start_date = today  # только текущий день
+        period_start = today  # только текущий день
     elif period == "week":
-        start_date = today - timedelta(days=today.weekday())  # понедельник текущей недели
+        period_start = today - timedelta(days=today.weekday())  # понедельник текущей недели
     elif period == "month":
-        start_date = today.replace(day=1)  # первое число текущего месяца
+        period_start = today.replace(day=1)  # первое число текущего месяца
     else:
         await update.message.reply_text("❗ Неизвестный период. Доступно: today | week | month")
         return
 
-    # --- Данные из таблицы ---
+    # --- Тянем все данные (БЕЗ фильтра по датам) ---
     rows = worksheet.get_all_values()[1:]  # без заголовка
     records = []
     for row in rows:
@@ -317,63 +317,91 @@ async def handle_report(update, context):
                 except ValueError:
                     continue
 
-            if start_date <= date_obj <= today:
-                records.append({
-                    "date": date_obj,
-                    "cal": safe_float(cal),
-                    "prot": safe_float(prot),
-                    "fat": safe_float(fat),
-                    "carb": safe_float(carb),
-                })
+            records.append({
+                "date": date_obj,
+                "cal": safe_float(cal),
+                "prot": safe_float(prot),
+                "fat": safe_float(fat),
+                "carb": safe_float(carb),
+            })
         except Exception:
             continue
 
     if not records:
-        await update.message.reply_text("📭 Данных за этот период нет.")
+        await update.message.reply_text("📭 Данных нет.")
         return
 
-    df = pd.DataFrame(records)
-    df["date"] = pd.to_datetime(df["date"])
+    df_all = pd.DataFrame(records)
+    df_all["date"] = pd.to_datetime(df_all["date"]).dt.date  # как date
 
-    # --- Группировка для графика ---
+    # --- Дата-диапазон для Тоталов ---
+    df_sum = df_all[(df_all["date"] >= period_start) & (df_all["date"] <= today)]
+    if df_sum.empty:
+        await update.message.reply_text("📭 Данных за выбранный период нет.")
+        return
+
+    # --- Дата-диапазон для Графика (скользящее окно) ---
     if period == "today":
-        # по дням
-        grouped = df.groupby("date").sum(numeric_only=True).reset_index()
-        grouped["label"] = grouped["date"].dt.strftime("%d.%m")
-        rng = pd.date_range(start=start_date, end=today, freq="D")
-        full_df = pd.DataFrame({"date": rng, "label": rng.strftime("%d.%m")})
-        grouped = pd.merge(full_df, grouped, on=["date", "label"], how="left").fillna(0)
+        chart_start = today - timedelta(days=29)  # последние 30 дней
+        df_chart = df_all[(df_all["date"] >= chart_start) & (df_all["date"] <= today)]
+
+        # группировка по дням
+        g = (pd.DataFrame(df_chart)
+                .assign(date=pd.to_datetime(df_chart["date"]))
+                .groupby("date").sum(numeric_only=True).reset_index())
+        # ось X: полный ряд дат
+        rng = pd.date_range(start=chart_start, end=today, freq="D")
+        full_df = pd.DataFrame({"date": rng})
+        grouped = (full_df
+                   .merge(g, on="date", how="left")
+                   .fillna(0))
+        grouped["label"] = grouped["date"].dt.strftime("%d.%m.%y")
 
     elif period == "week":
-        # по ISO-неделям
-        iso = df["date"].dt.isocalendar()
-        df["week"] = iso.week
-        df["year"] = iso.year
-        grouped = df.groupby(["year", "week"]).sum(numeric_only=True).reset_index()
-        grouped["label"] = grouped["week"].apply(lambda w: f"{int(w):02d}")
-        rng = pd.date_range(start=start_date, end=today, freq="W-MON")
+        # последние 12 недель, отсчёт с понедельника
+        this_monday = today - timedelta(days=today.weekday())
+        chart_start = this_monday - timedelta(weeks=11)
+        df_chart = df_all[(df_all["date"] >= chart_start) & (df_all["date"] <= today)]
+
+        df_tmp = pd.DataFrame(df_chart).assign(date=pd.to_datetime(df_chart["date"]))
+        iso = df_tmp["date"].dt.isocalendar()
+        df_tmp["year"] = iso.year.astype(int)
+        df_tmp["week"] = iso.week.astype(int)
+        g = df_tmp.groupby(["year", "week"]).sum(numeric_only=True).reset_index()
+
+        # полный ряд недель (понедельники)
+        rng = pd.date_range(start=chart_start, end=this_monday, freq="W-MON")
         iso_rng = rng.isocalendar()
         full_df = pd.DataFrame({
             "year": iso_rng.year.astype(int),
             "week": iso_rng.week.astype(int),
-            "label": [f"{int(w):02d}" for w in iso_rng.week],
         }).drop_duplicates()
-        grouped = pd.merge(full_df, grouped, on=["year", "week", "label"], how="left").fillna(0)
+
+        grouped = full_df.merge(g, on=["year", "week"], how="left").fillna(0)
+        # подпись — номер недели без ведущих нулей
+        grouped["label"] = grouped["week"].astype(int).astype(str)
 
     else:  # month
-        df["month"] = df["date"].dt.month
-        df["year"] = df["date"].dt.year
-        grouped = df.groupby(["year", "month"]).sum(numeric_only=True).reset_index()
-        grouped["label"] = grouped.apply(lambda r: f"{int(r['month']):02d}.{int(r['year'])%100:02d}", axis=1)
-        rng = pd.date_range(start=start_date, end=today, freq="MS")
-        full_df = pd.DataFrame({
-            "year": rng.year,
-            "month": rng.month,
-            "label": [f"{int(m):02d}.{int(y)%100:02d}" for m, y in zip(rng.month, rng.year)],
-        })
-        grouped = pd.merge(full_df, grouped, on=["year", "month", "label"], how="left").fillna(0)
+        # последние 12 месяцев (включая текущий)
+        first_day_cur = today.replace(day=1)
+        # построим список первых чисел месяцев через pandas
+        months_rng = pd.date_range(end=first_day_cur, periods=12, freq="MS")
+        chart_start = months_rng.min().date()
+        df_chart = df_all[(df_all["date"] >= chart_start) & (df_all["date"] <= today)]
 
-    # --- График ---
+        df_tmp = pd.DataFrame(df_chart).assign(date=pd.to_datetime(df_chart["date"]))
+        df_tmp["year"] = df_tmp["date"].dt.year
+        df_tmp["month"] = df_tmp["date"].dt.month
+        g = df_tmp.groupby(["year", "month"]).sum(numeric_only=True).reset_index()
+
+        full_df = pd.DataFrame({
+            "year": months_rng.year,
+            "month": months_rng.month,
+        })
+        grouped = full_df.merge(g, on=["year", "month"], how="left").fillna(0)
+        grouped["label"] = grouped.apply(lambda r: f"{int(r['month']):02d}.{int(r['year'])%100:02d}", axis=1)
+
+    # --- График (общий для всех режимов) ---
     plt.figure(figsize=(9, 5))
     plt.plot(grouped["label"], grouped["cal"], marker="o", linewidth=2, label="Калории 🔥")
     plt.plot(grouped["label"], grouped["prot"], marker="o", linewidth=2, label="Белки 💪")
@@ -390,11 +418,11 @@ async def handle_report(update, context):
     plt.savefig(chart_path)
     plt.close()
 
-    # --- Итоги (только за выбранный период) ---
-    total_cal = df["cal"].sum()
-    total_prot = df["prot"].sum()
-    total_fat = df["fat"].sum()
-    total_carb = df["carb"].sum()
+    # --- Итоги (строго за выбранный период) ---
+    total_cal = df_sum["cal"].sum()
+    total_prot = df_sum["prot"].sum()
+    total_fat = df_sum["fat"].sum()
+    total_carb = df_sum["carb"].sum()
 
     text_report = (
         f"📊 Отчёт за {period}:\n"
@@ -406,7 +434,6 @@ async def handle_report(update, context):
 
     await update.message.reply_text(text_report)
     await update.message.reply_photo(photo=open(chart_path, "rb"))
-
 
 # === Обработчики ===
 async def handle_text(update, context):
