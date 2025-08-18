@@ -48,15 +48,21 @@ vision_client = vision.ImageAnnotatorClient(credentials=creds)
 
 # --- маленький HTTP-сервер для Render Web Service ---
 def _start_keepalive_server():
-    port = int(os.getenv("PORT", "0"))
-    if not port:
-        return
-    class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+    port = int(os.getenv("PORT", "8080"))  # Render всегда задаёт PORT
+    class _Handler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"✅ Bot is alive!")
         def log_message(self, format, *args):
-            pass
+            return  # отключаем лишние логи
+
     def _serve():
-        with socketserver.TCPServer(("", port), _QuietHandler) as httpd:
+        with socketserver.TCPServer(("", port), _Handler) as httpd:
+            print(f"Keepalive server listening on port {port}")
             httpd.serve_forever()
+
     threading.Thread(target=_serve, daemon=True).start()
 
 # === Логирование ===
@@ -517,8 +523,10 @@ if __name__ == "__main__":
     from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
     from telegram.request import HTTPXRequest
 
-    _start_keepalive_server()  # для Render Web Service
+    # 1. Запускаем keepalive сервер для Render
+    _start_keepalive_server()
 
+    # 2. Запускаем Telegram-бота
     builder = ApplicationBuilder().token(TOKEN)
     if PROXY_URL:
         builder = builder.request(HTTPXRequest(proxy_url=PROXY_URL))
@@ -533,4 +541,3 @@ if __name__ == "__main__":
 
     logger.warning("🚀 Бот запущен...")
     app.run_polling(allowed_updates=["message"])
-
