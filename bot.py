@@ -10,8 +10,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from deep_translator import GoogleTranslator
-from telegram import ReplyKeyboardMarkup
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 from telegram.request import HTTPXRequest
 
 # === Google Vision ===
@@ -541,38 +541,51 @@ async def start(update, context):
         "⬇️ Вот меню команд:"
     )
     await update.message.reply_text(welcome_text)
-
-    # сразу показать меню
     await menu(update, context)
 
-# === Меню ===
+# === Меню (Inline кнопки) ===
 async def menu(update, context):
     menu_text = (
         "📌 Главное меню:\n\n"
         "🍏 Добавить продукт — просто напиши название и количество (пример: «яблоко 150 г»)\n"
         "📸 Добавить по фото — пришли фото блюда\n"
-        "📊 Отчёты — команда /report + период (today | week | month)\n"
+        "📊 Отчёты — выбери период ниже\n"
         "ℹ️ Помощь — /help"
     )
+
     keyboard = [
-        ["/report today", "/report week", "/report month"],
-        ["/help"]
+        [
+            InlineKeyboardButton("📊 Сегодня", callback_data="report_today"),
+            InlineKeyboardButton("📊 Неделя", callback_data="report_week"),
+            InlineKeyboardButton("📊 Месяц", callback_data="report_month"),
+        ],
+        [InlineKeyboardButton("ℹ️ Помощь", callback_data="help")]
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     await update.message.reply_text(menu_text, reply_markup=reply_markup)
 
-# === Help (короткий справочник) ===
+# === Help ===
 async def help_cmd(update, context):
-    help_text = (
-        "ℹ️ Доступные команды:\n\n"
-        "/start — приветствие и краткое описание\n"
-        "/menu — показать меню функций\n"
-        "/report today — отчёт за сегодня\n"
-        "/report week — отчёт за неделю\n"
-        "/report month — отчёт за месяц\n\n"
-        "Просто напиши название еды (например: «банан 100 г») или отправь фото блюда 📸"
-    )
+    help_text = ( ... )
     await update.message.reply_text(help_text)
+
+# === Inline кнопки ===
+async def button_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "report_today":
+        context.args = ["today"]
+        await handle_report(update, context)
+    elif query.data == "report_week":
+        context.args = ["week"]
+        await handle_report(update, context)
+    elif query.data == "report_month":
+        context.args = ["month"]
+        await handle_report(update, context)
+    elif query.data == "help":
+        await help_cmd(update, context)
 
 # === Запуск ===
 if __name__ == "__main__":
@@ -586,11 +599,17 @@ if __name__ == "__main__":
     app = builder.build()
 
     # Команды
-    app.add_handler(CommandHandler(["start", "help"], handle_command))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("report", handle_report))
+
+    # inline-кнопки
+    app.add_handler(CallbackQueryHandler(button_handler))
+
     # Сообщения
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.warning("🚀 Бот запущен...")
-    app.run_polling(allowed_updates=["message"])
+    app.run_polling(allowed_updates=["message", "callback_query"])
