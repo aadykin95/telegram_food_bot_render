@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from deep_translator import GoogleTranslator
+from telegram import ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters
 from telegram.request import HTTPXRequest
 
@@ -527,11 +528,54 @@ async def handle_command(update, context):
     log_to_sheets(user_id, username, command)
     await update.message.reply_text(f"📌 Команда '{command}' записана в журнал.")
 
+# === Приветствие ===
+async def start(update, context):
+    user_first = update.effective_user.first_name
+    welcome_text = (
+        f"👋 Привет, {user_first}!\n\n"
+        "Я бот для подсчёта калорий и ведения пищевого дневника. Вот что я умею:\n"
+        "🍏 Записывать еду из текста — просто напиши, например: «банан 120 г»\n"
+        "📸 Распознавать еду по фото — отправь фотографию блюда\n"
+        "📊 Строить отчёты — команда /report today | week | month\n"
+        "📝 Вести журнал питания в Google Sheets\n\n"
+        "⬇️ Вот меню команд:"
+    )
+    await update.message.reply_text(welcome_text)
+
+    # сразу показать меню
+    await menu(update, context)
+
+# === Меню ===
+async def menu(update, context):
+    menu_text = (
+        "📌 Главное меню:\n\n"
+        "🍏 Добавить продукт — просто напиши название и количество (пример: «яблоко 150 г»)\n"
+        "📸 Добавить по фото — пришли фото блюда\n"
+        "📊 Отчёты — команда /report + период (today | week | month)\n"
+        "ℹ️ Помощь — /help"
+    )
+    keyboard = [
+        ["/report today", "/report week", "/report month"],
+        ["/help"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text(menu_text, reply_markup=reply_markup)
+
+# === Help (короткий справочник) ===
+async def help_cmd(update, context):
+    help_text = (
+        "ℹ️ Доступные команды:\n\n"
+        "/start — приветствие и краткое описание\n"
+        "/menu — показать меню функций\n"
+        "/report today — отчёт за сегодня\n"
+        "/report week — отчёт за неделю\n"
+        "/report month — отчёт за месяц\n\n"
+        "Просто напиши название еды (например: «банан 100 г») или отправь фото блюда 📸"
+    )
+    await update.message.reply_text(help_text)
+
 # === Запуск ===
 if __name__ == "__main__":
-    from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
-    from telegram.request import HTTPXRequest
-
     # 1. Запускаем keepalive сервер для Render
     _start_keepalive_server()
 
