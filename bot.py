@@ -283,14 +283,16 @@ def format_per_item_breakdown(per_item):
 # === ОТЧЁТЫ ===
 async def handle_report(update, context):
     if len(context.args) == 0:
-        await update.message.reply_text("❗ Используй: /report today | week | month")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❗ Используй: /report today | week | month"
+        )
         return
 
-    user_id = str(update.effective_user.id)  # ID того, кто вызвал команду
+    user_id = str(update.effective_user.id)
     period = context.args[0].lower()
     today = datetime.now().date()
 
-    # --- Периоды для тоталов ---
     if period == "today":
         period_start = today
     elif period == "week":
@@ -298,23 +300,23 @@ async def handle_report(update, context):
     elif period == "month":
         period_start = today.replace(day=1)
     else:
-        await update.message.reply_text("❗ Неизвестный период. Доступно: today | week | month")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❗ Неизвестный период. Доступно: today | week | month"
+        )
         return
 
-    # --- Читаем все данные ---
-    rows = worksheet.get_all_values()[1:]  # без заголовка
+    rows = worksheet.get_all_values()[1:]
     records = []
     for row in rows:
         try:
-            row_user_id = row[2].strip()   # ⚡ колонка C = UserID
+            row_user_id = row[2].strip()
             if row_user_id != user_id:
-                continue  # пропускаем чужие записи
-
-            date_str = row[0].strip()      # колонка A = Date
+                continue
+            date_str = row[0].strip()
             cal = row[6].strip(); prot = row[7].strip(); fat = row[8].strip(); carb = row[9].strip()
             if not cal:
                 continue
-
             try:
                 date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
             except ValueError:
@@ -322,7 +324,6 @@ async def handle_report(update, context):
                     date_obj = datetime.strptime(date_str, "%d.%m.%Y").date()
                 except ValueError:
                     continue
-
             records.append({
                 "date": date_obj,
                 "cal": safe_float(cal),
@@ -334,16 +335,21 @@ async def handle_report(update, context):
             continue
 
     if not records:
-        await update.message.reply_text("📭 У тебя нет данных за этот период.")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="📭 У тебя нет данных за этот период."
+        )
         return
 
     df_all = pd.DataFrame(records)
     df_all["date"] = pd.to_datetime(df_all["date"]).dt.date
 
-    # --- Данные для итогов ---
     df_sum = df_all[(df_all["date"] >= period_start) & (df_all["date"] <= today)]
     if df_sum.empty:
-        await update.message.reply_text("📭 У тебя нет данных за выбранный период.")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="📭 У тебя нет данных за выбранный период."
+        )
         return
 
     # --- Данные для графика ---
@@ -421,8 +427,8 @@ async def handle_report(update, context):
         f"🍞 Углеводы: {total_carb:.1f} г"
     )
 
-    await update.message.reply_text(text_report)
-    await update.message.reply_photo(photo=open(chart_path, "rb"))
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=text_report)
+    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=open(chart_path, "rb"))
 
 # === Обработчики ===
 async def handle_text(update, context):
@@ -540,7 +546,7 @@ async def start(update, context):
         "📝 Вести журнал питания в Google Sheets\n\n"
         "⬇️ Вот меню команд:"
     )
-    await update.message.reply_text(welcome_text)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=welcome_text)
     await menu(update, context)
 
 # === Меню (Inline кнопки) ===
@@ -563,20 +569,29 @@ async def menu(update, context):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(menu_text, reply_markup=reply_markup)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=menu_text, reply_markup=reply_markup)
 
 # === Help ===
 async def help_cmd(update, context):
-    help_text = ( ... )
-    await update.message.reply_text(help_text)
+    help_text = (
+        "ℹ️ Справка:\n\n"
+        "• /start — начать и показать меню\n"
+        "• /menu — открыть меню с кнопками\n"
+        "• /help — показать справку\n"
+        "• /report today|week|month — отчёт по питанию\n\n"
+        "Также можно:\n"
+        "🍏 Написать название продукта с количеством\n"
+        "📸 Отправить фото блюда\n"
+    )
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=help_text)
 
 # === Inline кнопки ===
 async def button_handler(update, context):
     query = update.callback_query
     await query.answer()
 
-    # Подготовим «фейковый» update.message, чтобы можно было переиспользовать команды
-    update.message = query.message
+    # Устанавливаем message для совместимости
+    message = query.message
 
     if query.data == "report_today":
         context.args = ["today"]
@@ -588,7 +603,7 @@ async def button_handler(update, context):
         context.args = ["month"]
         await handle_report(update, context)
     elif query.data == "help":
-        await help_cmd(update, context)
+          await help_cmd(update, context)
 
 # === Запуск ===
 if __name__ == "__main__":
