@@ -480,7 +480,7 @@ async def handle_text(update, context):
     if food_info:
         log_to_sheets(
             user_id, username, cleaned_text, translated_text, "",
-            food_info["calories"], food_info["protein"], food_info["fat"], food_info["carbs"]
+            food_info["grams"], food_info["calories"], food_info["protein"], food_info["fat"], food_info["carbs"]
         )
         await update.message.reply_text(
             f"🍽 {food_info['name'].title()}\n"
