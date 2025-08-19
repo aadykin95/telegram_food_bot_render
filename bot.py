@@ -128,6 +128,7 @@ def get_food_info(query):
             item = data["items"][0]
             return {
                 "name": item.get("name",""),
+                "grams": float(item.get("serving_size_g", 0)),
                 "calories": float(item.get("calories",0)),
                 "protein": float(item.get("protein_g",0)),
                 "fat": float(item.get("fat_total_g",0)),
@@ -143,13 +144,13 @@ def safe_float(value):
         return 0.0
 
 # === Лог в Google Sheets ===
-def log_to_sheets(user_id, username, dish, translated_dish="", photo_url="", calories="", protein="", fat="", carbs=""):
+def log_to_sheets(user_id, username, dish, translated_dish="", photo_url="", grams="", calories="", protein="", fat="", carbs=""):
     now = datetime.now()
     date_str = now.strftime("%Y-%m-%d")
     time_str = now.strftime("%H:%M:%S")
     worksheet.append_row([
         date_str, time_str, user_id, username, dish, translated_dish,
-        calories, protein, fat, carbs, photo_url
+        grams, calories, protein, fat, carbs, photo_url
     ])
 
 # === Vision — распознать еду на фото ===
@@ -240,7 +241,7 @@ def to_cninjas_query(name_ru, amount, unit_ru):
 
 # === Подсчёт нутриентов ===
 def compute_totals_from_items(items):
-    totals = {"cal": 0.0, "prot": 0.0, "fat": 0.0, "carb": 0.0}
+    totals = {"cal": 0.0, "prot": 0.0, "fat": 0.0, "carb": 0.0, "grams": 0.0}
     per_item = []
     for it in items:
         name_ru = it["name_ru"]
@@ -254,6 +255,7 @@ def compute_totals_from_items(items):
             if not info:
                 per_item.append({"name_ru": name_ru, "query": query, "info": None})
                 continue
+        totals["grams"] += info["grams"]
         totals["cal"] += info["calories"]
         totals["prot"] += info["protein"]
         totals["fat"] += info["fat"]
@@ -275,7 +277,7 @@ def format_per_item_breakdown(per_item):
     for p in per_item:
         if p["info"]:
             info = p["info"]
-            lines.append(f"• {p['name_ru']} — {info['calories']:.0f} ккал, Б {info['protein']:.1f} г, Ж {info['fat']:.1f} г, У {info['carbs']:.1f} г")
+            lines.append(f"• {p['name_ru']} — {info['grams']:.0f} г, {info['calories']:.0f} ккал, Б {info['protein']:.1f} г, Ж {info['fat']:.1f} г, У {info['carbs']:.1f} г")
         else:
             lines.append(f"• {p['name_ru']} — не удалось найти в базе, пропущено")
     return "\n".join(lines)
@@ -314,6 +316,7 @@ async def handle_report(update, context):
             if row_user_id != user_id:
                 continue
             date_str = row[0].strip()
+            grams = row[5].strip()
             cal = row[6].strip(); prot = row[7].strip(); fat = row[8].strip(); carb = row[9].strip()
             if not cal:
                 continue
@@ -326,6 +329,7 @@ async def handle_report(update, context):
                     continue
             records.append({
                 "date": date_obj,
+                "grams": safe_float(grams),
                 "cal": safe_float(cal),
                 "prot": safe_float(prot),
                 "fat": safe_float(fat),
@@ -398,6 +402,7 @@ async def handle_report(update, context):
 
     # --- График ---
     plt.figure(figsize=(9, 5))
+    plt.plot(grouped["label"], grouped["grams"], marker="o", linewidth=2, label="Вес ⚖️")
     plt.plot(grouped["label"], grouped["cal"], marker="o", linewidth=2, label="Калории 🔥")
     plt.plot(grouped["label"], grouped["prot"], marker="o", linewidth=2, label="Белки 💪")
     plt.plot(grouped["label"], grouped["fat"], marker="o", linewidth=2, label="Жиры 🥑")
@@ -414,6 +419,7 @@ async def handle_report(update, context):
     plt.close()
 
     # --- Итоги ---
+    total_grams = df_sum["grams"].sum()
     total_cal = df_sum["cal"].sum()
     total_prot = df_sum["prot"].sum()
     total_fat = df_sum["fat"].sum()
@@ -421,6 +427,7 @@ async def handle_report(update, context):
 
     text_report = (
         f"📊 Отчёт за {period}:\n"
+        f"⚖️ Вес: {total_grams:.0f} г\n"
         f"🔥 Калории: {total_cal:.1f}\n"
         f"💪 Белки: {total_prot:.1f} г\n"
         f"🥑 Жиры: {total_fat:.1f} г\n"
@@ -458,7 +465,7 @@ async def handle_text(update, context):
         msg = (
             "✅ Записано в журнал!\n\n"
             f"{breakdown}\n\n"
-            f"Итого: 🔥 {totals['cal']:.0f} ккал, "
+            f"Итого: ⚖️ {totals['grams']:.0f} г, 🔥 {totals['cal']:.0f} ккал, "
             f"Б {totals['prot']:.1f} г, Ж {totals['fat']:.1f} г, У {totals['carb']:.1f} г"
         )
         await update.message.reply_text(msg)
@@ -477,6 +484,7 @@ async def handle_text(update, context):
         )
         await update.message.reply_text(
             f"🍽 {food_info['name'].title()}\n"
+            f"⚖️ Вес: {food_info['grams']:.0f} г\n"
             f"🔥 Калории: {food_info['calories']:.0f}\n"
             f"💪 Белки: {food_info['protein']:.1f} г\n"
             f"🥑 Жиры: {food_info['fat']:.1f} г\n"
