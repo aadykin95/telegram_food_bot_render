@@ -458,7 +458,7 @@ async def handle_text(update, context):
 
         log_to_sheets(
             user_id, username, dish_ru, translated_dish, "",
-            f"{totals['cal']:.1f}", f"{totals['prot']:.1f}", f"{totals['fat']:.1f}", f"{totals['carb']:.1f}"
+            f"{totals['grams']:.0f}", f"{totals['cal']:.1f}", f"{totals['prot']:.1f}", f"{totals['fat']:.1f}", f"{totals['carb']:.1f}"
         )
 
         breakdown = format_per_item_breakdown(per_item)
