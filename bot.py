@@ -522,14 +522,11 @@ async def handle_photo(update, context):
     guess_list = ", ".join(detected)
     prompt = (
         f"На фото вижу: {guess_list}.\n\n"
-        "Выберите действие или напишите корректировки:"
+        "Нажмите кнопку или напишите корректировки:"
     )
     
     keyboard = [
-        [
-            InlineKeyboardButton("✅ Принять как есть", callback_data="accept_photo"),
-            InlineKeyboardButton("✏️ Написать вручную", callback_data="manual_input")
-        ]
+        [InlineKeyboardButton("✅ Принять как есть", callback_data="accept_photo")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -629,11 +626,7 @@ async def button_handler(update, context):
         else:
             await query.edit_message_text("❌ Данные о фото не найдены. Попробуйте отправить фото снова.")
             
-    elif query.data == "manual_input":
-        # Просим пользователя написать продукты вручную
-        user_id = query.from_user.id
-        PENDING_CONFIRMATIONS[user_id] = {"detected": []}
-        await query.edit_message_text("✏️ Напишите продукты и количество вручную:\n\nНапример: «банан 150г, яблоко 200г»")
+
 
 # === Запуск ===
 if __name__ == "__main__":
