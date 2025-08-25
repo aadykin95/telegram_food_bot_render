@@ -426,8 +426,11 @@ async def handle_text(update, context):
             )
             await update.message.reply_text(
                 f"🍽 {food_info['name'].title()}\n"
-                f"⚖️ {food_info['grams']:.0f}г | 🔥 {food_info['calories']:.0f}ккал\n"
-                f"💪 Б{food_info['protein']:.1f}г | 🥑 Ж{food_info['fat']:.1f}г | 🍞 У{food_info['carbs']:.1f}г\n"
+                f"⚖️ {food_info['grams']:.0f}г\n"
+                f"🔥 {food_info['calories']:.0f}ккал\n"
+                f"💪 Б{food_info['protein']:.1f}г\n"
+                f"🥑 Ж{food_info['fat']:.1f}г\n"
+                f"🍞 У{food_info['carbs']:.1f}г\n"
                 f"✅ Записано в журнал!"
             )
         else:
@@ -445,8 +448,11 @@ async def handle_text(update, context):
         )
         await update.message.reply_text(
             f"🍽 {food_info['name'].title()}\n"
-            f"⚖️ {food_info['grams']:.0f}г | 🔥 {food_info['calories']:.0f}ккал\n"
-            f"💪 Б{food_info['protein']:.1f}г | 🥑 Ж{food_info['fat']:.1f}г | 🍞 У{food_info['carbs']:.1f}г\n"
+            f"⚖️ {food_info['grams']:.0f}г\n"
+            f"🔥 {food_info['calories']:.0f}ккал\n"
+            f"💪 Б{food_info['protein']:.1f}г\n"
+            f"🥑 Ж{food_info['fat']:.1f}г\n"
+            f"🍞 У{food_info['carbs']:.1f}г\n"
             f"✅ Записано в журнал!"
         )
     else:
