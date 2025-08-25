@@ -1,22 +1,17 @@
 import logging
-import re
 from datetime import datetime, timedelta
+import base64
 
 import gspread
-import requests
 import matplotlib
 matplotlib.use("Agg")  # серверный backend
 import matplotlib.pyplot as plt
 import pandas as pd
+import openai
 
-from deep_translator import GoogleTranslator
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, CallbackQueryHandler, filters
 from telegram.request import HTTPXRequest
-
-# === Google Vision ===
-from google.cloud import vision
-from google.oauth2 import service_account
 
 # === SETTINGS (Render-ready) ===
 import os, http.server, socketserver, threading
@@ -26,10 +21,13 @@ load_dotenv()  # локально подтянет .env; на Render не меш
 
 # --- Читаем переменные окружения ---
 TOKEN = os.environ["TOKEN"]
-CALORIE_NINJAS_API_KEY = os.environ["CALORIE_NINJAS_API_KEY"]
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME", "FoodLog")
 SHEET_NAME = os.environ.get("SHEET_NAME", "log")
 PROXY_URL = os.environ.get("PROXY_URL", "")
+
+# Настройка OpenAI
+openai.api_key = OPENAI_API_KEY
 
 # GCP credentials: кладём JSON целиком в переменную и сохраняем во временный файл
 GCP_CREDENTIALS_JSON = os.environ["GCP_CREDENTIALS_JSON"]
@@ -42,10 +40,6 @@ if not os.path.exists(GCP_CREDENTIALS_FILE):
 gc = gspread.service_account(filename=GCP_CREDENTIALS_FILE)
 sh = gc.open(SPREADSHEET_NAME)
 worksheet = sh.worksheet(SHEET_NAME)
-
-# === Google Vision ===
-creds = service_account.Credentials.from_service_account_file(GCP_CREDENTIALS_FILE)
-vision_client = vision.ImageAnnotatorClient(credentials=creds)
 
 # --- маленький HTTP-сервер для Render Web Service ---
 def _start_keepalive_server():
@@ -67,220 +61,195 @@ def _start_keepalive_server():
     threading.Thread(target=_serve, daemon=True).start()
 
 # === Логирование ===
-logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.ERROR)
 logger = logging.getLogger(__name__)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("telegram.vendor.ptb_urllib3").setLevel(logging.WARNING)
 
 # === Состояние подтверждений ===
 PENDING_CONFIRMATIONS = {}
 
-# === Справочники ===
-UNIT_MAP_RU_TO_EN = {
-    "шт": "piece", "штука": "piece", "штук": "pieces",
-    "г": "g", "гр": "g", "gram": "g", "грамм": "g", "граммов": "g",
-    "кг": "kg", "килограмм": "kg",
-    "мл": "ml", "л": "l",
-    "ложка": "tbsp", "ст.л": "tbsp", "столовая ложка": "tbsp",
-    "ч.л": "tsp", "чайная ложка": "tsp",
-    "ломтик": "slice", "кусок": "piece", "батон": "loaf",
-    "бутерброд": "sandwich",
-    "яйцо": "egg", "яйца": "eggs",
-}
-FOOD_HINTS = {
-    "банан","яблоко","груша","апельсин","мандарины","апельсины","огурец","помидор","томат","картофель","лук","чеснок",
-    "хлеб","батон","булка","булочка","сыр","яйцо","яйца","курица","филе","индейка","говядина","свинина","рыба","лосось",
-    "тунец","рис","гречка","макароны","паста","овсянка","йогурт","молоко","кефир","творог","масло","орехи","миндаль",
-    "фундук","арахис","печенье","шоколад","торт","пицца","бургер","суп","салат","брокколи","цветная капуста","авокадо",
-    "виноград","персик","слива","черника","клубника","малина","арбуз","дыня","ковбаса","колбаса","сосиски"
-}
 
-# === Утилиты текста ===
-def clean_food_text(text):
-    text = text.strip().lower()
-    text = re.sub(r"[!?,;:]", "", text)
-    text = re.sub(r"\s+", " ", text)
-    return text
 
-def translate_if_needed(text):
-    if not text:
-        return text
-    text = clean_food_text(text)
-    try:
-        translated = GoogleTranslator(source='auto', target='en').translate(text)
-        return clean_food_text(translated)
-    except Exception as e:
-        logger.error(f"Ошибка перевода: {e}")
-        return text
-
-# === CalorieNinjas API ===
+# === ChatGPT API ===
 def get_food_info(query):
-    url = f"https://api.calorieninjas.com/v1/nutrition?query={query}"
-    headers = {"X-Api-Key": CALORIE_NINJAS_API_KEY}
+    """
+    Получает информацию о продукте через ChatGPT API
+    """
+    prompt = f"""
+    Проанализируй следующий продукт питания и верни точную информацию о его пищевой ценности.
+    
+    Продукт: {query}
+    
+    Верни ответ в строго определённом JSON формате:
+    {{
+        "name": "название продукта",
+        "grams": число_граммов,
+        "calories": число_калорий,
+        "protein": число_граммов_белков,
+        "fat": число_граммов_жиров,
+        "carbs": число_граммов_углеводов
+    }}
+    
+    Важные правила:
+    1. Если в запросе указано количество (например "150 г банана"), используй это количество
+    2. Если количество не указано, используй стандартную порцию (обычно 100 г)
+    3. Все числовые значения должны быть float
+    4. Название продукта должно быть на русском языке
+    5. Верни ТОЛЬКО JSON, без дополнительного текста
+    """
+    
     try:
-        response = requests.get(url, headers=headers, timeout=20)
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "Ты эксперт по питанию и пищевой ценности продуктов. Твоя задача - точно определить калории, белки, жиры, углеводы и вес продуктов."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1,
+            max_tokens=200
+        )
+        
+        content = response.choices[0].message.content.strip()
+        
+        # Извлекаем JSON из ответа
+        import json
+        try:
+            # Пытаемся найти JSON в ответе
+            start_idx = content.find('{')
+            end_idx = content.rfind('}') + 1
+            if start_idx != -1 and end_idx != 0:
+                json_str = content[start_idx:end_idx]
+                data = json.loads(json_str)
+                
+                return {
+                    "name": data.get("name", ""),
+                    "grams": float(data.get("grams", 0)),
+                    "calories": float(data.get("calories", 0)),
+                    "protein": float(data.get("protein", 0)),
+                    "fat": float(data.get("fat", 0)),
+                    "carbs": float(data.get("carbs", 0))
+                }
+        except json.JSONDecodeError as e:
+            logger.error(f"Ошибка парсинга JSON: {e}, ответ: {content}")
+            return None
+            
     except Exception as e:
-        logger.error(f"CalorieNinjas запрос упал: {e}")
+        logger.error(f"ChatGPT запрос упал: {e}")
         return None
-    if response.status_code == 200:
-        data = response.json()
-        if data.get("items"):
-            item = data["items"][0]
-            return {
-                "name": item.get("name",""),
-                "grams": float(item.get("serving_size_g", 0)),
-                "calories": float(item.get("calories",0)),
-                "protein": float(item.get("protein_g",0)),
-                "fat": float(item.get("fat_total_g",0)),
-                "carbs": float(item.get("carbohydrates_total_g",0))
-            }
-    logger.warning(f"CalorieNinjas response {response.status_code}: {response.text[:200] if 'response' in locals() else 'no response'}")
+    
     return None
 
 def safe_float(value):
     try:
         return float(str(value).replace(",", "."))
-    except:
+    except (ValueError, TypeError):
         return 0.0
 
 # === Лог в Google Sheets ===
-def log_to_sheets(user_id, username, dish, translated_dish="", photo_url="", grams="", calories="", protein="", fat="", carbs=""):
+def log_to_sheets(user_id, username, dish, grams="", calories="", protein="", fat="", carbs=""):
     now = datetime.now()
     date_str = now.strftime("%Y-%m-%d")
     time_str = now.strftime("%H:%M:%S")
     worksheet.append_row([
-        date_str, time_str, user_id, username, dish, translated_dish,
-        grams, calories, protein, fat, carbs, photo_url
+        date_str, time_str, user_id, username, dish,
+        grams, calories, protein, fat, carbs
     ])
 
-# === Vision — распознать еду на фото ===
+# === ChatGPT — распознать еду на фото ===
 def detect_food_in_photo(image_bytes, max_items=6):
+    """
+    Распознаёт продукты питания на фото используя ChatGPT Vision
+    """
     # image_bytes должен быть bytes, не bytearray
     if isinstance(image_bytes, bytearray):
         image_bytes = bytes(image_bytes)
 
-    image = vision.Image(content=image_bytes)
-
-    # Лейблы
-    labels_response = vision_client.label_detection(image=image)
-    labels = labels_response.label_annotations or []
-    logger.info("Vision labels (top 10): " + ", ".join(f"{l.description}:{l.score:.2f}" for l in labels[:10]))
-
-    # Объекты (может быть отключено в проекте — тогда просто пропустим)
+    # Кодируем изображение в base64
+    image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+    
     try:
-        objects_response = vision_client.object_localization(image=image)
-        objects = objects_response.localized_object_annotations or []
-        logger.info("Vision objects (top 10): " + ", ".join(f"{o.name}:{o.score:.2f}" for o in objects[:10]))
+        prompt = """
+        Проанализируй это изображение и определи, какие продукты питания на нём изображены, а также их примерное количество или вес.
+        
+        Верни ответ в строго определённом JSON формате:
+        {
+            "food_items": [
+                {"name": "название продукта", "amount": "примерное количество или вес"},
+                {"name": "название продукта", "amount": "примерное количество или вес"}
+            ]
+        }
+        
+        Правила:
+        1. Верни только съедобные продукты питания
+        2. Используй русские названия продуктов
+        3. Максимум 6 продуктов
+        4. Если на фото нет еды, верни пустой массив
+        5. Игнорируй посуду, мебель, одежду и другие непищевые предметы
+        6. Для количества используй: "1 шт", "2 шт", "150 г", "200 мл", "1 стакан", "1 тарелка" и т.д.
+        7. Если количество определить сложно, используй "1 порция"
+        8. Верни ТОЛЬКО JSON, без дополнительного текста
+        """
+        
+        response = openai.ChatCompletion.create(
+            model="gpt-4-vision-preview",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_base64}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=300,
+            temperature=0.1
+        )
+        
+        content = response.choices[0].message.content.strip()
+        
+        # Парсим JSON ответ
+        import json
+        try:
+            # Пытаемся найти JSON в ответе
+            start_idx = content.find('{')
+            end_idx = content.rfind('}') + 1
+            if start_idx != -1 and end_idx != 0:
+                json_str = content[start_idx:end_idx]
+                data = json.loads(json_str)
+                food_items = data.get("food_items", [])
+                
+                # Формируем список продуктов с количеством
+                formatted_items = []
+                seen_names = set()
+                
+                for item in food_items:
+                    if isinstance(item, dict):
+                        name = item.get("name", "").strip().lower()
+                        amount = item.get("amount", "1 порция").strip()
+                    else:
+                        # Fallback для старого формата
+                        name = str(item).strip().lower()
+                        amount = "1 порция"
+                    
+                    if name and name not in seen_names:
+                        seen_names.add(name)
+                        formatted_items.append(f"{name} {amount}")
+                
+                return formatted_items[:max_items]
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"Ошибка парсинга JSON от ChatGPT Vision: {e}, ответ: {content}")
+            return []
+            
     except Exception as e:
-        logger.warning(f"Object localization недоступно: {e}")
-        objects = []
-
-    candidates = []
-    for lb in labels[:25]:
-        candidates.append(lb.description.lower())
-    for obj in objects[:25]:
-        candidates.append(obj.name.lower())
-
-    items, seen = [], set()
-    for name in candidates:
-        name = clean_food_text(name)
-        if name in FOOD_HINTS or any(k in name for k in [
-            "bread","banana","apple","tomato","cucumber","salmon","fish","meat",
-            "cheese","egg","rice","pasta","yogurt","milk","oat","beef","pork","chicken","sausage","ham","bacon","noodle","potato"
-        ]):
-            if name not in seen:
-                seen.add(name)
-                items.append(name)
-
-    if not items:
-        # если ничего «едового» — возьмём 1–3 верхних лейбла как догадку
-        items = [clean_food_text(lb.description) for lb in labels[:3]]
-
-    return items[:max_items]
-
-# === Парсинг подтверждения пользователя ===
-def parse_user_confirmation(text, fallback_items):
-    """
-    Формат: 'банан 1шт, яблоко 150 г, хлеб 1 ломтик'
-    Если пусто — 1 шт для каждого распознанного.
-    """
-    text = (text or "").strip()
-    if not text:
-        return [{"name_ru": it, "amount": 1.0, "unit_ru": "шт"} for it in fallback_items]
-
-    parts = [p.strip() for p in text.split(",") if p.strip()]
-    items = []
-    for p in parts:
-        m = re.match(r"([^\d]+?)\s*([\d.,]+)?\s*([^\d,]+)?$", p, flags=re.UNICODE)
-        if m:
-            name_ru = clean_food_text(m.group(1))
-            amount = safe_float(m.group(2)) if m.group(2) else 1.0
-            unit_ru = clean_food_text(m.group(3)) if m.group(3) else "шт"
-            unit_ru = (unit_ru
-                       .replace("грамм", "г").replace("гр", "г")
-                       .replace("килограмм", "кг").replace("килог", "кг")
-                       .replace("милилитр","мл").replace("миллилитр","мл")
-                       .replace("штук","шт").replace("штуки","шт")
-                       .replace("slice","ломтик"))
-            items.append({"name_ru": name_ru, "amount": amount, "unit_ru": unit_ru})
-    if not items:
-        items = [{"name_ru": it, "amount": 1.0, "unit_ru": "шт"} for it in fallback_items]
-    return items
-
-# === Построить запрос к CalorieNinjas ===
-def to_cninjas_query(name_ru, amount, unit_ru):
-    name_en = translate_if_needed(name_ru)
-    unit_key = (unit_ru or "").strip().lower()
-    unit_en = UNIT_MAP_RU_TO_EN.get(unit_key, unit_key or "piece")
-    if unit_en in ("piece", "pieces", "egg", "eggs", "loaf", "slice", "sandwich", "tbsp", "tsp"):
-        qty_val = int(amount) if float(amount).is_integer() else amount
-        qty_str = f"{qty_val} {unit_en}"
-    else:
-        qty_str = f"{amount}{unit_en if unit_en in ('g','kg','ml','l') else ' ' + unit_en}"
-    return f"{qty_str} {name_en}".strip()
-
-# === Подсчёт нутриентов ===
-def compute_totals_from_items(items):
-    totals = {"cal": 0.0, "prot": 0.0, "fat": 0.0, "carb": 0.0, "grams": 0.0}
-    per_item = []
-    for it in items:
-        name_ru = it["name_ru"]
-        amount = it.get("amount", 1.0)
-        unit_ru = it.get("unit_ru", "шт")
-        query = to_cninjas_query(name_ru, amount, unit_ru)
-        info = get_food_info(query)
-        if not info:
-            fallback_query = translate_if_needed(name_ru)
-            info = get_food_info(fallback_query)
-            if not info:
-                per_item.append({"name_ru": name_ru, "query": query, "info": None})
-                continue
-        totals["grams"] += info["grams"]
-        totals["cal"] += info["calories"]
-        totals["prot"] += info["protein"]
-        totals["fat"] += info["fat"]
-        totals["carb"] += info["carbs"]
-        per_item.append({"name_ru": name_ru, "query": query, "info": info})
-    return totals, per_item
-
-def format_items_ru(items):
-    chunks = []
-    for it in items:
-        amount = it.get("amount", 1.0)
-        amount_str = str(int(amount)) if float(amount).is_integer() else str(amount)
-        unit_ru = it.get("unit_ru", "шт")
-        chunks.append(f"{it['name_ru']} {amount_str} {unit_ru}")
-    return "; ".join(chunks)
-
-def format_per_item_breakdown(per_item):
-    lines = []
-    for p in per_item:
-        if p["info"]:
-            info = p["info"]
-            lines.append(f"• {p['name_ru']} — {info['grams']:.0f} г, {info['calories']:.0f} ккал, Б {info['protein']:.1f} г, Ж {info['fat']:.1f} г, У {info['carbs']:.1f} г")
-        else:
-            lines.append(f"• {p['name_ru']} — не удалось найти в базе, пропущено")
-    return "\n".join(lines)
+        logger.error(f"ChatGPT Vision запрос упал: {e}")
+        return []
+    
+    return []
 
 # === ОТЧЁТЫ ===
 async def handle_report(update, context):
@@ -356,7 +325,7 @@ async def handle_report(update, context):
         )
         return
 
-    # --- Данные для графика ---
+    # Данные для графика
     if period == "today":
         chart_start = today - timedelta(days=29)
         df_chart = df_all[(df_all["date"] >= chart_start) & (df_all["date"] <= today)]
@@ -400,7 +369,7 @@ async def handle_report(update, context):
         grouped = full_df.merge(g, on=["year", "month"], how="left").fillna(0)
         grouped["label"] = grouped.apply(lambda r: f"{int(r['month']):02d}.{int(r['year'])%100:02d}", axis=1)
 
-    # --- График ---
+    # График
     plt.figure(figsize=(9, 5))
     plt.plot(grouped["label"], grouped["grams"], marker="o", linewidth=2, label="Вес ⚖️")
     plt.plot(grouped["label"], grouped["cal"], marker="o", linewidth=2, label="Калории 🔥")
@@ -418,7 +387,7 @@ async def handle_report(update, context):
     plt.savefig(chart_path)
     plt.close()
 
-    # --- Итоги ---
+    # Итоги
     total_grams = df_sum["grams"].sum()
     total_cal = df_sum["cal"].sum()
     total_prot = df_sum["prot"].sum()
@@ -445,53 +414,43 @@ async def handle_text(update, context):
 
     # Ожидание подтверждения по фото
     if user_id in PENDING_CONFIRMATIONS:
-        fallback_items = PENDING_CONFIRMATIONS.pop(user_id).get("detected", [])
-        items = parse_user_confirmation(text, fallback_items)
-        if not items:
-            await update.message.reply_text("Не понял формат. Пример: «банан 1шт, яблоко 150 г, хлеб 1 ломтик». Попробуй ещё раз.")
-            PENDING_CONFIRMATIONS[user_id] = {"detected": fallback_items}
-            return
-
-        totals, per_item = compute_totals_from_items(items)
-        dish_ru = format_items_ru(items)
-        translated_dish = translate_if_needed(dish_ru)
-
-        log_to_sheets(
-            user_id, username, dish_ru, translated_dish, "",
-            f"{totals['grams']:.0f}", f"{totals['cal']:.1f}", f"{totals['prot']:.1f}", f"{totals['fat']:.1f}", f"{totals['carb']:.1f}"
-        )
-
-        breakdown = format_per_item_breakdown(per_item)
-        msg = (
-            "✅ Записано в журнал!\n\n"
-            f"{breakdown}\n\n"
-            f"Итого: ⚖️ {totals['grams']:.0f} г, 🔥 {totals['cal']:.0f} ккал, "
-            f"Б {totals['prot']:.1f} г, Ж {totals['fat']:.1f} г, У {totals['carb']:.1f} г"
-        )
-        await update.message.reply_text(msg)
+        PENDING_CONFIRMATIONS.pop(user_id)  # Очищаем состояние
+        
+        # Отправляем весь ответ пользователя в ChatGPT
+        food_info = get_food_info(text)
+        
+        if food_info:
+            log_to_sheets(
+                user_id, username, text,
+                food_info["grams"], food_info["calories"], food_info["protein"], food_info["fat"], food_info["carbs"]
+            )
+            await update.message.reply_text(
+                f"🍽 {food_info['name'].title()}\n"
+                f"⚖️ {food_info['grams']:.0f}г | 🔥 {food_info['calories']:.0f}ккал\n"
+                f"💪 Б{food_info['protein']:.1f}г | 🥑 Ж{food_info['fat']:.1f}г | 🍞 У{food_info['carbs']:.1f}г\n"
+                f"✅ Записано в журнал!"
+            )
+        else:
+            log_to_sheets(user_id, username, text)
+            await update.message.reply_text("✅ Записано в журнал! (калории не найдены)")
         return
 
     # Обычная текстовая запись
-    cleaned_text = clean_food_text(text)
-    translated_text = translate_if_needed(cleaned_text)
-    logger.warning(f"💬 Сообщение от {username}: {cleaned_text} → {translated_text}")
+    food_info = get_food_info(text)
 
-    food_info = get_food_info(translated_text)
     if food_info:
         log_to_sheets(
-            user_id, username, cleaned_text, translated_text, "",
+            user_id, username, text,
             food_info["grams"], food_info["calories"], food_info["protein"], food_info["fat"], food_info["carbs"]
         )
         await update.message.reply_text(
             f"🍽 {food_info['name'].title()}\n"
-            f"⚖️ Вес: {food_info['grams']:.0f} г\n"
-            f"🔥 Калории: {food_info['calories']:.0f}\n"
-            f"💪 Белки: {food_info['protein']:.1f} г\n"
-            f"🥑 Жиры: {food_info['fat']:.1f} г\n"
-            f"🍞 Углеводы: {food_info['carbs']:.1f} г\n✅ Записано в журнал!"
+            f"⚖️ {food_info['grams']:.0f}г | 🔥 {food_info['calories']:.0f}ккал\n"
+            f"💪 Б{food_info['protein']:.1f}г | 🥑 Ж{food_info['fat']:.1f}г | 🍞 У{food_info['carbs']:.1f}г\n"
+            f"✅ Записано в журнал!"
         )
     else:
-        log_to_sheets(user_id, username, cleaned_text, translated_text)
+        log_to_sheets(user_id, username, text)
         await update.message.reply_text("✅ Записано в журнал! (калории не найдены)")
 
 async def handle_photo(update, context):
@@ -508,19 +467,17 @@ async def handle_photo(update, context):
         await update.message.reply_text("Не получилось скачать фото. Попробуй ещё раз.")
         return
 
-    # распознаём Vision
+    # распознаём продукты
     try:
         detected = detect_food_in_photo(image_bytes)
-        logger.info(f"Vision API нашёл: {detected}")
     except Exception as e:
-        logger.exception("Vision API ошибка")
+        logger.error(f"Ошибка распознавания фото: {e}")
         await update.message.reply_text("Не получилось распознать еду на фото. Напиши вручную, например: «банан 1шт, яблоко 150 г».")
         return
 
     if not detected:
         await update.message.reply_text(
-            "На фото не распознал еду. Напиши, что на фото и сколько:\n"
-            "например: «банан 1шт, яблоко 150 г».")
+            "На фото не распознал еду. Напиши, что на фото и сколько.")
         PENDING_CONFIRMATIONS[user_id] = {"detected": []}
         return
 
@@ -529,30 +486,17 @@ async def handle_photo(update, context):
     guess_list = ", ".join(detected)
     prompt = (
         f"На фото вижу: {guess_list}.\n\n"
-        "Уточни количество/вес в формате:\n"
-        "банан 1шт, яблоко 150 г, хлеб 1 ломтик\n\n"
-        "Можно исправлять список (добавлять/удалять), я всё просуммирую."
+        "Напиши, что и сколько:"
     )
     await update.message.reply_text(prompt)
-
-async def handle_command(update, context):
-    user_id = update.message.from_user.id
-    username = update.message.from_user.username or str(user_id)
-    command = update.message.text
-    log_to_sheets(user_id, username, command)
-    await update.message.reply_text(f"📌 Команда '{command}' записана в журнал.")
 
 # === Приветствие ===
 async def start(update, context):
     user_first = update.effective_user.first_name
     welcome_text = (
         f"👋 Привет, {user_first}!\n\n"
-        "Я бот для подсчёта калорий и ведения пищевого дневника. Вот что я умею:\n"
-        "🍏 Записывать еду из текста — просто напиши, например: «банан 120 г»\n"
-        "📸 Распознавать еду по фото — отправь фотографию блюда\n"
-        "📊 Строить отчёты — команда /report today | week | month\n"
-        "📝 Вести журнал питания в Google Sheets\n\n"
-        "⬇️ Вот меню команд:"
+        "Я бот для подсчёта калорий. Пиши продукты или отправляй фото еды.\n"
+        "📊 Отчёты: /report today|week|month"
     )
     await context.bot.send_message(chat_id=update.effective_chat.id, text=welcome_text)
     await menu(update, context)
@@ -560,11 +504,9 @@ async def start(update, context):
 # === Меню (Inline кнопки) ===
 async def menu(update, context):
     menu_text = (
-        "📌 Главное меню:\n\n"
-        "🍏 Добавить продукт — просто напиши название и количество (пример: «яблоко 150 г»)\n"
-        "📸 Добавить по фото — пришли фото блюда\n"
-        "📊 Отчёты — выбери период ниже\n"
-        "ℹ️ Помощь — /help"
+        "📌 Меню:\n\n"
+        "🍏 Пиши продукты или отправляй фото\n"
+        "📊 Выбери период для отчёта:"
     )
 
     keyboard = [
@@ -582,14 +524,11 @@ async def menu(update, context):
 # === Help ===
 async def help_cmd(update, context):
     help_text = (
-        "ℹ️ Справка:\n\n"
-        "• /start — начать и показать меню\n"
-        "• /menu — открыть меню с кнопками\n"
-        "• /help — показать справку\n"
-        "• /report today|week|month — отчёт по питанию\n\n"
-        "Также можно:\n"
-        "🍏 Написать название продукта с количеством\n"
-        "📸 Отправить фото блюда\n"
+        "ℹ️ Команды:\n"
+        "• /start — приветствие\n"
+        "• /menu — меню\n"
+        "• /report today|week|month — отчёты\n\n"
+        "🍏 Пиши продукты или отправляй фото еды"
     )
     await context.bot.send_message(chat_id=update.effective_chat.id, text=help_text)
 
@@ -597,9 +536,6 @@ async def help_cmd(update, context):
 async def button_handler(update, context):
     query = update.callback_query
     await query.answer()
-
-    # Устанавливаем message для совместимости
-    message = query.message
 
     if query.data == "report_today":
         context.args = ["today"]
@@ -637,5 +573,4 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.warning("🚀 Бот запущен...")
     app.run_polling(allowed_updates=["message", "callback_query"])
