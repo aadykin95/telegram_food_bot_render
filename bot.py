@@ -557,11 +557,65 @@ async def menu(update, context):
             InlineKeyboardButton("📊 Неделя", callback_data="report_week"),
             InlineKeyboardButton("📊 Месяц", callback_data="report_month"),
         ],
+        [InlineKeyboardButton("🗑️ Очистить сегодня", callback_data="clear_today")],
         [InlineKeyboardButton("ℹ️ Помощь", callback_data="help")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await context.bot.send_message(chat_id=update.effective_chat.id, text=menu_text, reply_markup=reply_markup)
+
+# === Очистка записей за сегодня ===
+async def clear_today_records(update, context):
+    user_id = str(update.effective_user.id)
+    today = datetime.now().date()
+    
+    try:
+        # Получаем все записи
+        all_records = worksheet.get_all_values()
+        headers = all_records[0]  # Первая строка - заголовки
+        
+        # Находим строки для удаления (записи пользователя за сегодня)
+        rows_to_delete = []
+        for i, row in enumerate(all_records[1:], start=2):  # Начинаем со 2-й строки (индекс 1)
+            try:
+                record_user_id = row[2].strip()  # User ID в 3-м столбце
+                record_date_str = row[0].strip()  # Дата в 1-м столбце
+                
+                # Проверяем, что это запись пользователя за сегодня
+                if record_user_id == user_id:
+                    try:
+                        record_date = datetime.strptime(record_date_str, "%Y-%m-%d").date()
+                        if record_date == today:
+                            rows_to_delete.append(i)
+                    except ValueError:
+                        # Если формат даты другой, пропускаем
+                        continue
+            except IndexError:
+                # Если строка неполная, пропускаем
+                continue
+        
+        if not rows_to_delete:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="📭 У вас нет записей за сегодня."
+            )
+            return
+        
+        # Удаляем строки (с конца, чтобы индексы не сбились)
+        for row_index in reversed(rows_to_delete):
+            worksheet.delete_rows(row_index)
+        
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"🗑️ Удалено {len(rows_to_delete)} записей за сегодня!"
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при очистке записей: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❌ Ошибка при очистке записей. Попробуйте позже."
+        )
 
 # === Help ===
 async def help_cmd(update, context):
@@ -590,6 +644,8 @@ async def button_handler(update, context):
         await handle_report(update, context)
     elif query.data == "help":
           await help_cmd(update, context)
+    elif query.data == "clear_today":
+        await clear_today_records(update, context)
     elif query.data == "accept_photo":
         # Обрабатываем принятие фото как есть
         user_id = query.from_user.id
