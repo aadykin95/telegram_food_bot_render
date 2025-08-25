@@ -190,7 +190,7 @@ def detect_food_in_photo(image_bytes, max_items=6):
         """
         
         response = openai.ChatCompletion.create(
-            model="gpt-4-vision-preview",
+            model="gpt-4o",
             messages=[
                 {
                     "role": "user",
@@ -477,7 +477,8 @@ async def handle_photo(update, context):
 
     if not detected:
         await update.message.reply_text(
-            "На фото не распознал еду. Напиши, что на фото и сколько.")
+            "На фото не распознал еду. Напиши, что на фото и сколько.\n\n"
+            "Например: «овсянка 200г, кофе 250мл»")
         PENDING_CONFIRMATIONS[user_id] = {"detected": []}
         return
 
