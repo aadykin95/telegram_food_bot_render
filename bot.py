@@ -414,28 +414,57 @@ async def handle_text(update, context):
 
     # Ожидание подтверждения по фото
     if user_id in PENDING_CONFIRMATIONS:
-        PENDING_CONFIRMATIONS.pop(user_id)  # Очищаем состояние
+        pending_data = PENDING_CONFIRMATIONS.pop(user_id)  # Очищаем состояние
         
-        # Отправляем весь ответ пользователя в ChatGPT
-        food_info = get_food_info(text)
-        
-        if food_info:
-            log_to_sheets(
-                user_id, username, text,
-                food_info["grams"], food_info["calories"], food_info["protein"], food_info["fat"], food_info["carbs"]
-            )
-            await update.message.reply_text(
-                f"🍽 {food_info['name'].title()}\n"
-                f"⚖️ {food_info['grams']:.0f}г\n"
-                f"🔥 {food_info['calories']:.0f}ккал\n"
-                f"💪 Б{food_info['protein']:.1f}г\n"
-                f"🥑 Ж{food_info['fat']:.1f}г\n"
-                f"🍞 У{food_info['carbs']:.1f}г\n"
-                f"✅ Записано в журнал!"
-            )
+        # Если пользователь просто подтвердил (написал "да", "да", "ок" и т.д.)
+        if text.lower().strip() in ['да', 'да', 'ок', 'ok', 'yes', 'верно', 'правильно']:
+            # Используем уже распознанные продукты
+            detected_items = pending_data.get("detected", [])
+            if detected_items:
+                # Объединяем все продукты в один запрос
+                combined_text = ", ".join(detected_items)
+                food_info = get_food_info(combined_text)
+                
+                if food_info:
+                    log_to_sheets(
+                        user_id, username, combined_text,
+                        food_info["grams"], food_info["calories"], food_info["protein"], food_info["fat"], food_info["carbs"]
+                    )
+                    await update.message.reply_text(
+                        f"🍽 {food_info['name'].title()}\n"
+                        f"⚖️ {food_info['grams']:.0f}г\n"
+                        f"🔥 {food_info['calories']:.0f}ккал\n"
+                        f"💪 Б{food_info['protein']:.1f}г\n"
+                        f"🥑 Ж{food_info['fat']:.1f}г\n"
+                        f"🍞 У{food_info['carbs']:.1f}г\n"
+                        f"✅ Записано в журнал!"
+                    )
+                else:
+                    log_to_sheets(user_id, username, combined_text)
+                    await update.message.reply_text("✅ Записано в журнал! (калории не найдены)")
+            else:
+                await update.message.reply_text("❌ Не удалось обработать фото. Попробуйте написать продукты вручную.")
         else:
-            log_to_sheets(user_id, username, text)
-            await update.message.reply_text("✅ Записано в журнал! (калории не найдены)")
+            # Пользователь написал конкретные продукты - обрабатываем как обычно
+            food_info = get_food_info(text)
+            
+            if food_info:
+                log_to_sheets(
+                    user_id, username, text,
+                    food_info["grams"], food_info["calories"], food_info["protein"], food_info["fat"], food_info["carbs"]
+                )
+                await update.message.reply_text(
+                    f"🍽 {food_info['name'].title()}\n"
+                    f"⚖️ {food_info['grams']:.0f}г\n"
+                    f"🔥 {food_info['calories']:.0f}ккал\n"
+                    f"💪 Б{food_info['protein']:.1f}г\n"
+                    f"🥑 Ж{food_info['fat']:.1f}г\n"
+                    f"🍞 У{food_info['carbs']:.1f}г\n"
+                    f"✅ Записано в журнал!"
+                )
+            else:
+                log_to_sheets(user_id, username, text)
+                await update.message.reply_text("✅ Записано в журнал! (калории не найдены)")
         return
 
     # Обычная текстовая запись
@@ -488,14 +517,23 @@ async def handle_photo(update, context):
         PENDING_CONFIRMATIONS[user_id] = {"detected": []}
         return
 
-    # Просим уточнить количество/вес
+    # Просим уточнить количество/вес с кнопками
     PENDING_CONFIRMATIONS[user_id] = {"detected": detected}
     guess_list = ", ".join(detected)
     prompt = (
         f"На фото вижу: {guess_list}.\n\n"
-        "Напиши, что и сколько:"
+        "Выберите действие или напишите корректировки:"
     )
-    await update.message.reply_text(prompt)
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Принять как есть", callback_data="accept_photo"),
+            InlineKeyboardButton("✏️ Написать вручную", callback_data="manual_input")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(prompt, reply_markup=reply_markup)
 
 # === Приветствие ===
 async def start(update, context):
@@ -555,6 +593,47 @@ async def button_handler(update, context):
         await handle_report(update, context)
     elif query.data == "help":
           await help_cmd(update, context)
+    elif query.data == "accept_photo":
+        # Обрабатываем принятие фото как есть
+        user_id = query.from_user.id
+        username = query.from_user.username or str(user_id)
+        
+        if user_id in PENDING_CONFIRMATIONS:
+            pending_data = PENDING_CONFIRMATIONS.pop(user_id)
+            detected_items = pending_data.get("detected", [])
+            
+            if detected_items:
+                # Объединяем все продукты в один запрос
+                combined_text = ", ".join(detected_items)
+                food_info = get_food_info(combined_text)
+                
+                if food_info:
+                    log_to_sheets(
+                        user_id, username, combined_text,
+                        food_info["grams"], food_info["calories"], food_info["protein"], food_info["fat"], food_info["carbs"]
+                    )
+                    await query.edit_message_text(
+                        f"🍽 {food_info['name'].title()}\n"
+                        f"⚖️ {food_info['grams']:.0f}г\n"
+                        f"🔥 {food_info['calories']:.0f}ккал\n"
+                        f"💪 Б{food_info['protein']:.1f}г\n"
+                        f"🥑 Ж{food_info['fat']:.1f}г\n"
+                        f"🍞 У{food_info['carbs']:.1f}г\n"
+                        f"✅ Записано в журнал!"
+                    )
+                else:
+                    log_to_sheets(user_id, username, combined_text)
+                    await query.edit_message_text("✅ Записано в журнал! (калории не найдены)")
+            else:
+                await query.edit_message_text("❌ Не удалось обработать фото. Попробуйте написать продукты вручную.")
+        else:
+            await query.edit_message_text("❌ Данные о фото не найдены. Попробуйте отправить фото снова.")
+            
+    elif query.data == "manual_input":
+        # Просим пользователя написать продукты вручную
+        user_id = query.from_user.id
+        PENDING_CONFIRMATIONS[user_id] = {"detected": []}
+        await query.edit_message_text("✏️ Напишите продукты и количество вручную:\n\nНапример: «банан 150г, яблоко 200г»")
 
 # === Запуск ===
 if __name__ == "__main__":
